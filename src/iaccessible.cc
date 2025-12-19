@@ -498,7 +498,17 @@ bool SelectTab(const NodePtr& tab) {
   self.vt = VT_I4;
   self.lVal = CHILDID_SELF;
   if (S_OK == tab->accSelect(SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION, self)) {
-    return true;
+    VARIANT state;
+    VariantInit(&state);
+    bool selected = false;
+    if (S_OK == tab->get_accState(self, &state)) {
+      selected = (state.vt == VT_I4) &&
+                 ((state.lVal & STATE_SYSTEM_SELECTED) != 0);
+    }
+    VariantClear(&state);
+    if (selected) {
+      return true;
+    }
   }
   return S_OK == tab->accDoDefaultAction(self);
 }

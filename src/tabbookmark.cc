@@ -19,6 +19,7 @@ struct DragNewTabState {
   POINT drop_point = {-1, -1};
   int start_tab_count = 0;
   NodePtr start_selected_tab = nullptr;
+  int start_selected_index = -1;
   std::vector<NodePtr> start_tabs;
   bool pending = false;
 };
@@ -208,6 +209,7 @@ void ResetDragNewTabState() {
   drag_new_tab_state.drop_point = {-1, -1};
   drag_new_tab_state.start_tab_count = 0;
   drag_new_tab_state.start_selected_tab = nullptr;
+  drag_new_tab_state.start_selected_index = -1;
   drag_new_tab_state.start_tabs.clear();
   drag_new_tab_state.pending = false;
   if (drag_new_tab_restore_timer != 0) {
@@ -236,7 +238,7 @@ NodePtr FindNewTabAfterDrag(const std::vector<NodePtr>& tabs) {
   return nullptr;
 }
 
-int GetTabIndex(const std::vector<NodePtr>& tabs, const NodePtr& target_tab) {
+int GetTabIndex(const std::vector<NodePtr>& tabs, const NodePtr& target_tab) {  
   if (!target_tab) {
     return -1;
   }
@@ -248,6 +250,13 @@ int GetTabIndex(const std::vector<NodePtr>& tabs, const NodePtr& target_tab) {
   return -1;
 }
 
+NodePtr GetTabByIndex(const std::vector<NodePtr>& tabs, int index) {
+  if (index < 0 || index >= static_cast<int>(tabs.size())) {
+    return nullptr;
+  }
+  return tabs[index];
+}
+
 int GetMoveStepsToEnd(const std::vector<NodePtr>& tabs,
                       const NodePtr& target_tab) {
   int index = GetTabIndex(tabs, target_tab);
@@ -256,6 +265,16 @@ int GetMoveStepsToEnd(const std::vector<NodePtr>& tabs,
   }
   int last_index = static_cast<int>(tabs.size()) - 1;
   return last_index > index ? last_index - index : 0;
+}
+
+NodePtr ResolveRestoreTab(const std::vector<NodePtr>& tabs) {
+  if (drag_new_tab_state.start_selected_tab) {
+    int index = GetTabIndex(tabs, drag_new_tab_state.start_selected_tab);
+    if (index >= 0) {
+      return tabs[index];
+    }
+  }
+  return GetTabByIndex(tabs, drag_new_tab_state.start_selected_index);
 }
 
 void MoveSelectedTabToEnd(HWND hwnd, int steps) {
@@ -287,7 +306,7 @@ void QueueDragNewTabRestore(const NodePtr& tab) {
     return;
   }
   drag_new_tab_restore_tab = tab;
-  drag_new_tab_restore_timer = SetTimer(nullptr, 0, 120,
+  drag_new_tab_restore_timer = SetTimer(nullptr, 0, 200,
                                         DragNewTabRestoreTimerProc);
 }
 
@@ -314,35 +333,46 @@ void CALLBACK DragNewTabTimerProc(HWND, UINT, UINT_PTR timer_id, DWORD) {
     return;
   }
 
-  NodePtr selected_tab = GetSelectedTab(top_container_view);
-  auto tabs = GetTabs(top_container_view);
-  NodePtr new_tab = FindNewTabAfterDrag(tabs);
-  int move_steps = GetMoveStepsToEnd(tabs, new_tab);
-
   if (drag_new_tab_state.mode == 2) {
-    bool need_restore = selected_tab && drag_new_tab_state.start_selected_tab &&
-                        selected_tab.Get() !=
-                            drag_new_tab_state.start_selected_tab.Get();
+    NodePtr selected_tab = GetSelectedTab(top_container_view);
+    auto tabs = GetTabs(top_container_view);
+    NodePtr new_tab = FindNewTabAfterDrag(tabs);
+    int move_steps = GetMoveStepsToEnd(tabs, new_tab);
+    bool new_tab_selected =
+        new_tab && selected_tab && selected_tab.Get() == new_tab.Get();
+
     if (new_tab && move_steps > 0) {
-      if (!selected_tab || selected_tab.Get() != new_tab.Get()) {
-        SelectTab(new_tab);
-        need_restore = true;
+      if (!new_tab_selected) {
+        new_tab_selected = SelectTab(new_tab);
       }
-      MoveSelectedTabToEnd(drag_new_tab_state.hwnd, move_steps);
+      if (new_tab_selected) {
+        MoveSelectedTabToEnd(drag_new_tab_state.hwnd, move_steps);
+        tabs = GetTabs(top_container_view);
+      }
     }
-    if (need_restore) {
-      SelectTab(drag_new_tab_state.start_selected_tab);
-      QueueDragNewTabRestore(drag_new_tab_state.start_selected_tab);
+
+    NodePtr restore_tab = ResolveRestoreTab(tabs);
+    if (restore_tab &&
+        (!selected_tab || selected_tab.Get() != restore_tab.Get() ||
+         new_tab_selected)) {
+      SelectTab(restore_tab);
+      QueueDragNewTabRestore(restore_tab);
     }
     return;
   }
 
   if (drag_new_tab_state.mode == 1) {
+    NodePtr selected_tab = GetSelectedTab(top_container_view);
+    auto tabs = GetTabs(top_container_view);
+    NodePtr new_tab = FindNewTabAfterDrag(tabs);
     if (new_tab) {
-      if (!selected_tab || selected_tab.Get() != new_tab.Get()) {
-        SelectTab(new_tab);
+      int move_steps = GetMoveStepsToEnd(tabs, new_tab);
+      bool new_tab_selected =
+          selected_tab && selected_tab.Get() == new_tab.Get();
+      if (!new_tab_selected) {
+        new_tab_selected = SelectTab(new_tab);
       }
-      if (move_steps > 0) {
+      if (new_tab_selected && move_steps > 0) {
         MoveSelectedTabToEnd(drag_new_tab_state.hwnd, move_steps);
       }
       return;
@@ -386,8 +416,11 @@ void PrepareDragNewTabState() {
   drag_new_tab_state.mode = mode;
   drag_new_tab_state.hwnd = hwnd;
   drag_new_tab_state.start_tab_count = GetTabCount(top_container_view);
-  drag_new_tab_state.start_selected_tab = GetSelectedTab(top_container_view);
+  drag_new_tab_state.start_selected_tab = GetSelectedTab(top_container_view);   
   drag_new_tab_state.start_tabs = GetTabs(top_container_view);
+  drag_new_tab_state.start_selected_index =
+      GetTabIndex(drag_new_tab_state.start_tabs,
+                  drag_new_tab_state.start_selected_tab);
 }
 
 void QueueDragNewTabCheck(POINT pt) {
