@@ -480,7 +480,7 @@ NodePtr GetTabAtPoint(const NodePtr& top, POINT pt) {
     if (GetAccessibleRole(child) != ROLE_SYSTEM_PAGETAB) {
       return false;
     }
-    GetAccessibleSize(child, [&hit, &pt](RECT rect) {
+    GetAccessibleSize(child, [&hit, &pt, &child](RECT rect) {
       if (PtInRect(&rect, pt)) {
         hit = child;
       }
