@@ -3,12 +3,17 @@
 
 #include <oleacc.h>
 #include <wrl/client.h>
+#include <vector>
 
 using NodePtr = Microsoft::WRL::ComPtr<IAccessible>;
 
 NodePtr GetChromeWidgetWin(HWND hwnd);
 NodePtr GetTopContainerView(HWND hwnd);
 int GetTabCount(const NodePtr& top);
+std::vector<NodePtr> GetTabs(const NodePtr& top);
+NodePtr GetSelectedTab(const NodePtr& top);
+NodePtr GetTabAtPoint(const NodePtr& top, POINT pt);
+bool SelectTab(const NodePtr& tab);
 bool IsOnOneTab(const NodePtr& top, POINT pt);
 bool IsOnlyOneTab(const NodePtr& top);
 bool IsOnTheTabBar(const NodePtr& top, POINT pt);

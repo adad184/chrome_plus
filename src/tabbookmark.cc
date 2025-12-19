@@ -1,6 +1,7 @@
 #include "tabbookmark.h"
 
 #include <windows.h>
+#include <vector>
 
 #include "config.h"
 #include "hotkey.h"
@@ -11,6 +12,19 @@ namespace {
 
 HHOOK mouse_hook = nullptr;
 static POINT lbutton_down_point = {-1, -1};
+
+struct DragNewTabState {
+  int mode = 0;
+  HWND hwnd = nullptr;
+  POINT drop_point = {-1, -1};
+  int start_tab_count = 0;
+  NodePtr start_selected_tab = nullptr;
+  std::vector<NodePtr> start_tabs;
+  bool pending = false;
+};
+
+DragNewTabState drag_new_tab_state;
+UINT_PTR drag_new_tab_timer = 0;
 
 #define KEY_PRESSED 0x8000
 bool IsPressed(int key) {
@@ -186,6 +200,131 @@ bool HandleDrag(PMOUSEHOOKSTRUCT pmouse) {
   return (abs(dx) > dragThresholdX || abs(dy) > dragThresholdY);
 }
 
+void ResetDragNewTabState() {
+  drag_new_tab_state.mode = 0;
+  drag_new_tab_state.hwnd = nullptr;
+  drag_new_tab_state.drop_point = {-1, -1};
+  drag_new_tab_state.start_tab_count = 0;
+  drag_new_tab_state.start_selected_tab = nullptr;
+  drag_new_tab_state.start_tabs.clear();
+  drag_new_tab_state.pending = false;
+}
+
+NodePtr FindNewTabAfterDrag(const NodePtr& top) {
+  auto tabs = GetTabs(top);
+  if (drag_new_tab_state.start_tabs.empty()) {
+    return nullptr;
+  }
+  for (const auto& tab : tabs) {
+    bool existed = false;
+    for (const auto& old_tab : drag_new_tab_state.start_tabs) {
+      if (tab.Get() == old_tab.Get()) {
+        existed = true;
+        break;
+      }
+    }
+    if (!existed) {
+      return tab;
+    }
+  }
+  return nullptr;
+}
+
+void CALLBACK DragNewTabTimerProc(HWND, UINT, UINT_PTR timer_id, DWORD) {
+  KillTimer(nullptr, timer_id);
+  drag_new_tab_timer = 0;
+
+  if (!drag_new_tab_state.pending) {
+    return;
+  }
+  drag_new_tab_state.pending = false;
+
+  if (drag_new_tab_state.mode != 1 && drag_new_tab_state.mode != 2) {
+    return;
+  }
+
+  NodePtr top_container_view = GetTopContainerView(drag_new_tab_state.hwnd);
+  if (!top_container_view) {
+    return;
+  }
+
+  int tab_count = GetTabCount(top_container_view);
+  if (tab_count <= drag_new_tab_state.start_tab_count) {
+    return;
+  }
+
+  NodePtr selected_tab = GetSelectedTab(top_container_view);
+  if (drag_new_tab_state.mode == 2) {
+    if (selected_tab && drag_new_tab_state.start_selected_tab &&
+        selected_tab.Get() != drag_new_tab_state.start_selected_tab.Get()) {
+      SelectTab(drag_new_tab_state.start_selected_tab);
+    }
+    return;
+  }
+
+  if (drag_new_tab_state.mode == 1) {
+    if (selected_tab && drag_new_tab_state.start_selected_tab &&
+        selected_tab.Get() == drag_new_tab_state.start_selected_tab.Get()) {
+      NodePtr new_tab = FindNewTabAfterDrag(top_container_view);
+      if (new_tab) {
+        SelectTab(new_tab);
+        return;
+      }
+      NodePtr hit_tab =
+          GetTabAtPoint(top_container_view, drag_new_tab_state.drop_point);
+      if (hit_tab) {
+        SelectTab(hit_tab);
+      }
+    }
+  }
+}
+
+void PrepareDragNewTabState() {
+  if (drag_new_tab_timer != 0) {
+    KillTimer(nullptr, drag_new_tab_timer);
+    drag_new_tab_timer = 0;
+  }
+  drag_new_tab_state.pending = false;
+
+  int mode = config.GetDragNewTabMode();
+  if (mode != 1 && mode != 2) {
+    ResetDragNewTabState();
+    return;
+  }
+
+  HWND hwnd = GetTopWnd(GetFocus());
+  NodePtr top_container_view = GetTopContainerView(hwnd);
+  if (!top_container_view) {
+    ResetDragNewTabState();
+    return;
+  }
+
+  drag_new_tab_state.mode = mode;
+  drag_new_tab_state.hwnd = hwnd;
+  drag_new_tab_state.start_tab_count = GetTabCount(top_container_view);
+  drag_new_tab_state.start_selected_tab = GetSelectedTab(top_container_view);
+  drag_new_tab_state.start_tabs = GetTabs(top_container_view);
+}
+
+void QueueDragNewTabCheck(POINT pt) {
+  if (drag_new_tab_state.mode != 1 && drag_new_tab_state.mode != 2) {
+    return;
+  }
+  if (!drag_new_tab_state.hwnd) {
+    return;
+  }
+
+  drag_new_tab_state.drop_point = pt;
+  drag_new_tab_state.pending = true;
+
+  if (drag_new_tab_timer != 0) {
+    KillTimer(nullptr, drag_new_tab_timer);
+    drag_new_tab_timer = 0;
+  }
+  // Delay the check to allow Chrome to finish the drag-drop tab creation.
+  drag_new_tab_timer = SetTimer(nullptr, 0, 120, DragNewTabTimerProc);
+}
+
 // Open bookmarks in a new tab.
 bool HandleBookmark(PMOUSEHOOKSTRUCT pmouse) {
   int mode = config.GetBookmarkNewTabMode();
@@ -248,9 +387,11 @@ LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDOWN:
       // Simply record the position of `LBUTTONDOWN` for drag detection
       lbutton_down_point = pmouse->pt;
+      PrepareDragNewTabState();
       break;
     case WM_LBUTTONUP:
       if (HandleDrag(pmouse)) {
+        QueueDragNewTabCheck(pmouse->pt);
         break;
       } else if (HandleBookmark(pmouse)) {
         handled = true;
