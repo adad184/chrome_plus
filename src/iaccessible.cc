@@ -436,6 +436,74 @@ int GetTabCount(const NodePtr& top) {
       }));
 }
 
+std::vector<NodePtr> GetTabs(const NodePtr& top) {
+  std::vector<NodePtr> tabs;
+  NodePtr page_tab_pane = FindPageTabPane(top);
+  if (!page_tab_pane) {
+    return tabs;
+  }
+  TraversalAccessible(page_tab_pane, [&tabs](const NodePtr& child) {
+    if (GetAccessibleRole(child) == ROLE_SYSTEM_PAGETAB) {
+      tabs.push_back(child);
+    }
+    return false;
+  });
+  return tabs;
+}
+
+NodePtr GetSelectedTab(const NodePtr& top) {
+  NodePtr page_tab_pane = FindPageTabPane(top);
+  if (!page_tab_pane) {
+    return nullptr;
+  }
+  NodePtr selected = nullptr;
+  TraversalAccessible(page_tab_pane, [&selected](const NodePtr& child) {
+    if (GetAccessibleRole(child) != ROLE_SYSTEM_PAGETAB) {
+      return false;
+    }
+    if ((GetAccessibleState(child) & STATE_SYSTEM_SELECTED) != 0) {
+      selected = child;
+      return true;
+    }
+    return false;
+  });
+  return selected;
+}
+
+NodePtr GetTabAtPoint(const NodePtr& top, POINT pt) {
+  NodePtr page_tab_pane = FindPageTabPane(top);
+  if (!page_tab_pane) {
+    return nullptr;
+  }
+  NodePtr hit = nullptr;
+  TraversalAccessible(page_tab_pane, [&hit, &pt](const NodePtr& child) {
+    if (GetAccessibleRole(child) != ROLE_SYSTEM_PAGETAB) {
+      return false;
+    }
+    GetAccessibleSize(child, [&hit, &pt](RECT rect) {
+      if (PtInRect(&rect, pt)) {
+        hit = child;
+      }
+    });
+    return hit != nullptr;
+  });
+  return hit;
+}
+
+bool SelectTab(const NodePtr& tab) {
+  if (!tab) {
+    return false;
+  }
+  VARIANT self;
+  self.vt = VT_I4;
+  self.lVal = CHILDID_SELF;
+  if (S_OK == tab->accDoDefaultAction(self)) {
+    return true;
+  }
+  return S_OK == tab->accSelect(SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION,      
+                                self);
+}
+
 // Whether the mouse is on a tab
 bool IsOnOneTab(const NodePtr& top, POINT pt) {
   NodePtr page_tab_pane = FindPageTabPane(top);

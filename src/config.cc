@@ -39,12 +39,15 @@ void Config::LoadConfig() {
   wheel_tab_ = ::GetPrivateProfileIntW(L"tabs", L"wheel_tab", 1,
                                        GetIniPath().c_str()) != 0;
   wheel_tab_when_press_rbutton_ =
-      ::GetPrivateProfileIntW(L"tabs", L"wheel_tab_when_press_rbutton", 1,
+      ::GetPrivateProfileIntW(L"tabs", L"wheel_tab_when_press_rbutton", 1,      
                               GetIniPath().c_str()) != 0;
   open_url_new_tab_ = LoadOpenUrlNewTabMode();
   bookmark_new_tab_ = LoadBookmarkNewTabMode();
-  new_tab_disable_ = ::GetPrivateProfileIntW(L"tabs", L"new_tab_disable", 1,
-                                             GetIniPath().c_str()) != 0;
+  drag_new_tab_ =
+      ::GetPrivateProfileIntW(L"tabs", L"drag_new_tab", 0,
+                              GetIniPath().c_str());
+  new_tab_disable_ = ::GetPrivateProfileIntW(L"tabs", L"new_tab_disable", 1,    
+                                             GetIniPath().c_str()) != 0;        
   disable_tab_name_ = GetIniString(L"tabs", L"new_tab_disable_name", L"");
 }
 
