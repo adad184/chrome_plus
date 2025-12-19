@@ -12,6 +12,8 @@ namespace {
 
 HHOOK mouse_hook = nullptr;
 static POINT lbutton_down_point = {-1, -1};
+static bool lbutton_down_on_tab_bar = false;
+static bool last_on_tab_bar = false;
 
 struct DragNewTabState {
   int mode = 0;
@@ -39,6 +41,21 @@ constexpr int kDragNewTabRestoreAttempts = 4;
 #define KEY_PRESSED 0x8000
 bool IsPressed(int key) {
   return key && (::GetKeyState(key) & KEY_PRESSED) != 0;
+}
+
+bool HasValidLButtonDownPoint() {
+  return lbutton_down_point.x >= 0 && lbutton_down_point.y >= 0;
+}
+
+bool HandleDrag(PMOUSEHOOKSTRUCT pmouse) {
+  if (!HasValidLButtonDownPoint()) {
+    return false;
+  }
+  static int dragThresholdX = GetSystemMetrics(SM_CXDRAG);
+  static int dragThresholdY = GetSystemMetrics(SM_CYDRAG);
+  int dx = pmouse->pt.x - lbutton_down_point.x;
+  int dy = pmouse->pt.y - lbutton_down_point.y;
+  return (abs(dx) > dragThresholdX || abs(dy) > dragThresholdY);
 }
 
 // Compared with `IsOnlyOneTab`, this function additionally implements tick
@@ -195,22 +212,6 @@ bool HandleMiddleClick(PMOUSEHOOKSTRUCT pmouse) {
   }
 
   return false;
-}
-
-// Check if mouse movement is a drag operation.
-// Since `MouseProc` hook doesn't handle any drag-related events,
-// this detection can return early to avoid interference.
-bool HandleDrag(PMOUSEHOOKSTRUCT pmouse) {
-  // Add drag detection logic for
-  // https://github.com/Bush2021/chrome_plus/issues/152
-  static int dragThresholdX = GetSystemMetrics(SM_CXDRAG);
-  static int dragThresholdY = GetSystemMetrics(SM_CYDRAG);
-  if (lbutton_down_point.x < 0 || lbutton_down_point.y < 0) {
-    return false;
-  }
-  int dx = pmouse->pt.x - lbutton_down_point.x;
-  int dy = pmouse->pt.y - lbutton_down_point.y;
-  return (abs(dx) > dragThresholdX || abs(dy) > dragThresholdY);
 }
 
 bool IsDragNewTabEnabled() {
@@ -478,7 +479,7 @@ void QueueDragNewTabCheck(HWND hwnd, const NodePtr& top_container_view,
     return;
   }
   drag_new_tab_state.mode = mode;
-  if (drag_new_tab_state.start_tabs.empty() ||
+  if (!drag_new_tab_state.armed || drag_new_tab_state.start_tabs.empty() ||
       drag_new_tab_state.hwnd != hwnd) {
     if (!InitDragNewTabState(hwnd, top_container_view)) {
       return;
@@ -494,6 +495,7 @@ void QueueDragNewTabCheck(HWND hwnd, const NodePtr& top_container_view,
   drag_new_tab_state.drop_point = pt;
   drag_new_tab_state.pending = true;
   drag_new_tab_state.check_attempts = kDragNewTabMaxAttempts;
+  drag_new_tab_state.armed = false;
 
   if (drag_new_tab_timer != 0) {
     KillTimer(nullptr, drag_new_tab_timer);
@@ -558,18 +560,27 @@ LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
   }
 
   if (wParam == WM_MOUSEMOVE || wParam == WM_NCMOUSEMOVE) {
-    if (IsDragNewTabEnabled() && IsPressed(VK_LBUTTON)) {
+    if (IsDragNewTabEnabled()) {
       POINT pt = pmouse->pt;
-      HWND hwnd = WindowFromPoint(pt);
-      hwnd = GetTopWnd(hwnd);
+      HWND hwnd = GetTopWnd(GetFocus());
+      if (!hwnd) {
+        hwnd = GetTopWnd(WindowFromPoint(pt));
+      }
       NodePtr top_container_view = GetTopContainerView(hwnd);
-      if (top_container_view && IsOnTheTabBar(top_container_view, pt)) {
-        drag_new_tab_state.armed = true;
-        if (drag_new_tab_state.start_tabs.empty() ||
-            drag_new_tab_state.hwnd != hwnd) {
-          InitDragNewTabState(hwnd, top_container_view);
+      bool is_on_tab_bar =
+          top_container_view && IsOnTheTabBar(top_container_view, pt);
+      if (is_on_tab_bar && IsPressed(VK_LBUTTON) && !lbutton_down_on_tab_bar) {
+        bool from_outside = !last_on_tab_bar;
+        bool dragged_from_down =
+            HasValidLButtonDownPoint() && HandleDrag(pmouse);
+        if (from_outside || dragged_from_down) {
+          if (!drag_new_tab_state.armed || drag_new_tab_state.hwnd != hwnd) {
+            InitDragNewTabState(hwnd, top_container_view);
+          }
+          drag_new_tab_state.armed = true;
         }
       }
+      last_on_tab_bar = is_on_tab_bar;
     }
     return CallNextHookEx(mouse_hook, nCode, wParam, lParam);
   }
@@ -578,8 +589,19 @@ LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
   bool handled = false;
   switch (wParam) {
     case WM_LBUTTONDOWN:
-      // Simply record the position of `LBUTTONDOWN` for drag detection
       lbutton_down_point = pmouse->pt;
+      lbutton_down_on_tab_bar = false;
+      if (IsDragNewTabEnabled()) {
+        POINT pt = pmouse->pt;
+        HWND hwnd = GetTopWnd(GetFocus());
+        if (!hwnd) {
+          hwnd = GetTopWnd(WindowFromPoint(pt));
+        }
+        NodePtr top_container_view = GetTopContainerView(hwnd);
+        if (top_container_view && IsOnTheTabBar(top_container_view, pt)) {
+          lbutton_down_on_tab_bar = true;
+        }
+      }
       drag_new_tab_state.armed = false;
       if (drag_new_tab_timer != 0) {
         KillTimer(nullptr, drag_new_tab_timer);
@@ -592,19 +614,20 @@ LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONUP:
       if (IsDragNewTabEnabled()) {
         POINT pt = pmouse->pt;
-        HWND hwnd = WindowFromPoint(pt);
-        hwnd = GetTopWnd(hwnd);
+        HWND hwnd = GetTopWnd(GetFocus());
+        if (!hwnd) {
+          hwnd = GetTopWnd(WindowFromPoint(pt));
+        }
         NodePtr top_container_view = GetTopContainerView(hwnd);
         if (top_container_view && IsOnTheTabBar(top_container_view, pt) &&
             !IsOnNewTabButton(top_container_view, pt) &&
-            (drag_new_tab_state.armed || HandleDrag(pmouse))) {
+            drag_new_tab_state.armed) {
           QueueDragNewTabCheck(hwnd, top_container_view, pt);
-          drag_new_tab_state.armed = false;
-          lbutton_down_point = {-1, -1};
           break;
         }
       }
       drag_new_tab_state.armed = false;
+      lbutton_down_on_tab_bar = false;
       lbutton_down_point = {-1, -1};
       if (HandleBookmark(pmouse)) {
         handled = true;
