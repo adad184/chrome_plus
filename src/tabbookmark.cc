@@ -25,6 +25,8 @@ struct DragNewTabState {
 
 DragNewTabState drag_new_tab_state;
 UINT_PTR drag_new_tab_timer = 0;
+UINT_PTR drag_new_tab_restore_timer = 0;
+NodePtr drag_new_tab_restore_tab = nullptr;
 
 #define KEY_PRESSED 0x8000
 bool IsPressed(int key) {
@@ -208,6 +210,11 @@ void ResetDragNewTabState() {
   drag_new_tab_state.start_selected_tab = nullptr;
   drag_new_tab_state.start_tabs.clear();
   drag_new_tab_state.pending = false;
+  if (drag_new_tab_restore_timer != 0) {
+    KillTimer(nullptr, drag_new_tab_restore_timer);
+    drag_new_tab_restore_timer = 0;
+  }
+  drag_new_tab_restore_tab = nullptr;
 }
 
 NodePtr FindNewTabAfterDrag(const std::vector<NodePtr>& tabs) {
@@ -260,7 +267,31 @@ void MoveSelectedTabToEnd(HWND hwnd, int steps) {
   }
 }
 
-void CALLBACK DragNewTabTimerProc(HWND, UINT, UINT_PTR timer_id, DWORD) {
+void CALLBACK DragNewTabRestoreTimerProc(HWND, UINT, UINT_PTR timer_id,
+                                         DWORD) {
+  KillTimer(nullptr, timer_id);
+  drag_new_tab_restore_timer = 0;
+  if (drag_new_tab_restore_tab) {
+    SelectTab(drag_new_tab_restore_tab);
+  }
+  drag_new_tab_restore_tab = nullptr;
+}
+
+void QueueDragNewTabRestore(const NodePtr& tab) {
+  if (drag_new_tab_restore_timer != 0) {
+    KillTimer(nullptr, drag_new_tab_restore_timer);
+    drag_new_tab_restore_timer = 0;
+  }
+  drag_new_tab_restore_tab = nullptr;
+  if (!tab) {
+    return;
+  }
+  drag_new_tab_restore_tab = tab;
+  drag_new_tab_restore_timer = SetTimer(nullptr, 0, 120,
+                                        DragNewTabRestoreTimerProc);
+}
+
+void CALLBACK DragNewTabTimerProc(HWND, UINT, UINT_PTR timer_id, DWORD) {       
   KillTimer(nullptr, timer_id);
   drag_new_tab_timer = 0;
 
@@ -301,6 +332,7 @@ void CALLBACK DragNewTabTimerProc(HWND, UINT, UINT_PTR timer_id, DWORD) {
     }
     if (need_restore) {
       SelectTab(drag_new_tab_state.start_selected_tab);
+      QueueDragNewTabRestore(drag_new_tab_state.start_selected_tab);
     }
     return;
   }
@@ -331,6 +363,11 @@ void PrepareDragNewTabState() {
     KillTimer(nullptr, drag_new_tab_timer);
     drag_new_tab_timer = 0;
   }
+  if (drag_new_tab_restore_timer != 0) {
+    KillTimer(nullptr, drag_new_tab_restore_timer);
+    drag_new_tab_restore_timer = 0;
+  }
+  drag_new_tab_restore_tab = nullptr;
   drag_new_tab_state.pending = false;
 
   int mode = config.GetDragNewTabMode();
@@ -361,6 +398,11 @@ void QueueDragNewTabCheck(POINT pt) {
     return;
   }
 
+  if (drag_new_tab_restore_timer != 0) {
+    KillTimer(nullptr, drag_new_tab_restore_timer);
+    drag_new_tab_restore_timer = 0;
+  }
+  drag_new_tab_restore_tab = nullptr;
   drag_new_tab_state.drop_point = pt;
   drag_new_tab_state.pending = true;
 
