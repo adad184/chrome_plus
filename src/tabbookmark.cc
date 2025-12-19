@@ -21,6 +21,8 @@ struct DragNewTabState {
   NodePtr start_selected_tab = nullptr;
   int start_selected_index = -1;
   std::vector<NodePtr> start_tabs;
+  int check_attempts = 0;
+  bool armed = false;
   bool pending = false;
 };
 
@@ -28,6 +30,11 @@ DragNewTabState drag_new_tab_state;
 UINT_PTR drag_new_tab_timer = 0;
 UINT_PTR drag_new_tab_restore_timer = 0;
 NodePtr drag_new_tab_restore_tab = nullptr;
+int drag_new_tab_restore_attempts = 0;
+
+constexpr UINT kDragNewTabCheckIntervalMs = 80;
+constexpr int kDragNewTabMaxAttempts = 12;
+constexpr int kDragNewTabRestoreAttempts = 4;
 
 #define KEY_PRESSED 0x8000
 bool IsPressed(int key) {
@@ -198,9 +205,17 @@ bool HandleDrag(PMOUSEHOOKSTRUCT pmouse) {
   // https://github.com/Bush2021/chrome_plus/issues/152
   static int dragThresholdX = GetSystemMetrics(SM_CXDRAG);
   static int dragThresholdY = GetSystemMetrics(SM_CYDRAG);
+  if (lbutton_down_point.x < 0 || lbutton_down_point.y < 0) {
+    return false;
+  }
   int dx = pmouse->pt.x - lbutton_down_point.x;
   int dy = pmouse->pt.y - lbutton_down_point.y;
   return (abs(dx) > dragThresholdX || abs(dy) > dragThresholdY);
+}
+
+bool IsDragNewTabEnabled() {
+  int mode = config.GetDragNewTabMode();
+  return mode == 1 || mode == 2;
 }
 
 void ResetDragNewTabState() {
@@ -211,12 +226,15 @@ void ResetDragNewTabState() {
   drag_new_tab_state.start_selected_tab = nullptr;
   drag_new_tab_state.start_selected_index = -1;
   drag_new_tab_state.start_tabs.clear();
+  drag_new_tab_state.check_attempts = 0;
+  drag_new_tab_state.armed = false;
   drag_new_tab_state.pending = false;
   if (drag_new_tab_restore_timer != 0) {
     KillTimer(nullptr, drag_new_tab_restore_timer);
     drag_new_tab_restore_timer = 0;
   }
   drag_new_tab_restore_tab = nullptr;
+  drag_new_tab_restore_attempts = 0;
 }
 
 NodePtr FindNewTabAfterDrag(const std::vector<NodePtr>& tabs) {
@@ -248,6 +266,32 @@ int GetTabIndex(const std::vector<NodePtr>& tabs, const NodePtr& target_tab) {
     }
   }
   return -1;
+}
+
+bool IsTabInList(const std::vector<NodePtr>& tabs, const NodePtr& target_tab) {
+  return GetTabIndex(tabs, target_tab) >= 0;
+}
+
+bool InitDragNewTabState(HWND hwnd, const NodePtr& top_container_view) {
+  int mode = config.GetDragNewTabMode();
+  if (mode != 1 && mode != 2) {
+    ResetDragNewTabState();
+    return false;
+  }
+  if (!hwnd || !top_container_view) {
+    ResetDragNewTabState();
+    return false;
+  }
+
+  drag_new_tab_state.mode = mode;
+  drag_new_tab_state.hwnd = hwnd;
+  drag_new_tab_state.start_tab_count = GetTabCount(top_container_view);
+  drag_new_tab_state.start_selected_tab = GetSelectedTab(top_container_view);
+  drag_new_tab_state.start_tabs = GetTabs(top_container_view);
+  drag_new_tab_state.start_selected_index =
+      GetTabIndex(drag_new_tab_state.start_tabs,
+                  drag_new_tab_state.start_selected_tab);
+  return !drag_new_tab_state.start_tabs.empty();
 }
 
 NodePtr GetTabByIndex(const std::vector<NodePtr>& tabs, int index) {
@@ -288,12 +332,38 @@ void MoveSelectedTabToEnd(HWND hwnd, int steps) {
 
 void CALLBACK DragNewTabRestoreTimerProc(HWND, UINT, UINT_PTR timer_id,
                                          DWORD) {
-  KillTimer(nullptr, timer_id);
-  drag_new_tab_restore_timer = 0;
-  if (drag_new_tab_restore_tab) {
-    SelectTab(drag_new_tab_restore_tab);
+  if (drag_new_tab_restore_attempts <= 0) {
+    KillTimer(nullptr, timer_id);
+    drag_new_tab_restore_timer = 0;
+    drag_new_tab_restore_tab = nullptr;
+    return;
   }
-  drag_new_tab_restore_tab = nullptr;
+
+  --drag_new_tab_restore_attempts;
+  if (!drag_new_tab_state.hwnd) {
+    KillTimer(nullptr, timer_id);
+    drag_new_tab_restore_timer = 0;
+    drag_new_tab_restore_tab = nullptr;
+    return;
+  }
+  NodePtr top_container_view = GetTopContainerView(drag_new_tab_state.hwnd);
+  if (!top_container_view) {
+    return;
+  }
+  auto tabs = GetTabs(top_container_view);
+  NodePtr restore_tab = ResolveRestoreTab(tabs);
+  if (!restore_tab) {
+    return;
+  }
+  NodePtr selected_tab = GetSelectedTab(top_container_view);
+  if (!selected_tab || selected_tab.Get() != restore_tab.Get()) {
+    SelectTab(restore_tab);
+  }
+  if (drag_new_tab_restore_attempts <= 0) {
+    KillTimer(nullptr, timer_id);
+    drag_new_tab_restore_timer = 0;
+    drag_new_tab_restore_tab = nullptr;
+  }
 }
 
 void QueueDragNewTabRestore(const NodePtr& tab) {
@@ -302,11 +372,13 @@ void QueueDragNewTabRestore(const NodePtr& tab) {
     drag_new_tab_restore_timer = 0;
   }
   drag_new_tab_restore_tab = nullptr;
+  drag_new_tab_restore_attempts = 0;
   if (!tab) {
     return;
   }
   drag_new_tab_restore_tab = tab;
-  drag_new_tab_restore_timer = SetTimer(nullptr, 0, 200,
+  drag_new_tab_restore_attempts = kDragNewTabRestoreAttempts;
+  drag_new_tab_restore_timer = SetTimer(nullptr, 0, kDragNewTabCheckIntervalMs,
                                         DragNewTabRestoreTimerProc);
 }
 
@@ -317,40 +389,70 @@ void CALLBACK DragNewTabTimerProc(HWND, UINT, UINT_PTR timer_id, DWORD) {
   if (!drag_new_tab_state.pending) {
     return;
   }
-  drag_new_tab_state.pending = false;
+  if (drag_new_tab_state.check_attempts <= 0) {
+    ResetDragNewTabState();
+    return;
+  }
+  --drag_new_tab_state.check_attempts;
 
   if (drag_new_tab_state.mode != 1 && drag_new_tab_state.mode != 2) {
+    ResetDragNewTabState();
     return;
   }
 
-  NodePtr top_container_view = GetTopContainerView(drag_new_tab_state.hwnd);
+  NodePtr top_container_view = GetTopContainerView(drag_new_tab_state.hwnd);    
   if (!top_container_view) {
+    ResetDragNewTabState();
+    return;
+  }
+  if (drag_new_tab_state.start_tabs.empty()) {
+    ResetDragNewTabState();
     return;
   }
 
-  int tab_count = GetTabCount(top_container_view);
-  if (tab_count <= drag_new_tab_state.start_tab_count) {
+  auto tabs = GetTabs(top_container_view);
+  NodePtr selected_tab = GetSelectedTab(top_container_view);
+  NodePtr new_tab = FindNewTabAfterDrag(tabs);
+  if (!new_tab && selected_tab &&
+      !IsTabInList(drag_new_tab_state.start_tabs, selected_tab)) {
+    new_tab = selected_tab;
+  }
+
+  if (!new_tab) {
+    drag_new_tab_timer = SetTimer(nullptr, 0, kDragNewTabCheckIntervalMs,
+                                  DragNewTabTimerProc);
     return;
+  }
+
+  int move_steps = GetMoveStepsToEnd(tabs, new_tab);
+  auto ensure_selected = [&](const NodePtr& tab) -> bool {
+    if (!tab) {
+      return false;
+    }
+    if (selected_tab && selected_tab.Get() == tab.Get()) {
+      return true;
+    }
+    if (!SelectTab(tab)) {
+      return false;
+    }
+    NodePtr now_selected = GetSelectedTab(top_container_view);
+    return now_selected && now_selected.Get() == tab.Get();
+  };
+
+  bool new_tab_selected = ensure_selected(new_tab);
+  if (!new_tab_selected) {
+    if (move_steps > 0 || drag_new_tab_state.mode == 1) {
+      drag_new_tab_timer = SetTimer(nullptr, 0, kDragNewTabCheckIntervalMs,
+                                    DragNewTabTimerProc);
+      return;
+    }
+  }
+  if (move_steps > 0 && new_tab_selected) {
+    MoveSelectedTabToEnd(drag_new_tab_state.hwnd, move_steps);
+    tabs = GetTabs(top_container_view);
   }
 
   if (drag_new_tab_state.mode == 2) {
-    NodePtr selected_tab = GetSelectedTab(top_container_view);
-    auto tabs = GetTabs(top_container_view);
-    NodePtr new_tab = FindNewTabAfterDrag(tabs);
-    int move_steps = GetMoveStepsToEnd(tabs, new_tab);
-    bool new_tab_selected =
-        new_tab && selected_tab && selected_tab.Get() == new_tab.Get();
-
-    if (new_tab && move_steps > 0) {
-      if (!new_tab_selected) {
-        new_tab_selected = SelectTab(new_tab);
-      }
-      if (new_tab_selected) {
-        MoveSelectedTabToEnd(drag_new_tab_state.hwnd, move_steps);
-        tabs = GetTabs(top_container_view);
-      }
-    }
-
     NodePtr restore_tab = ResolveRestoreTab(tabs);
     if (restore_tab &&
         (!selected_tab || selected_tab.Get() != restore_tab.Get() ||
@@ -358,77 +460,29 @@ void CALLBACK DragNewTabTimerProc(HWND, UINT, UINT_PTR timer_id, DWORD) {
       SelectTab(restore_tab);
       QueueDragNewTabRestore(restore_tab);
     }
-    return;
+  } else if (!new_tab_selected) {
+    SelectTab(new_tab);
   }
 
-  if (drag_new_tab_state.mode == 1) {
-    NodePtr selected_tab = GetSelectedTab(top_container_view);
-    auto tabs = GetTabs(top_container_view);
-    NodePtr new_tab = FindNewTabAfterDrag(tabs);
-    if (new_tab) {
-      int move_steps = GetMoveStepsToEnd(tabs, new_tab);
-      bool new_tab_selected =
-          selected_tab && selected_tab.Get() == new_tab.Get();
-      if (!new_tab_selected) {
-        new_tab_selected = SelectTab(new_tab);
-      }
-      if (new_tab_selected && move_steps > 0) {
-        MoveSelectedTabToEnd(drag_new_tab_state.hwnd, move_steps);
-      }
-      return;
-    }
-    if (selected_tab && drag_new_tab_state.start_selected_tab &&
-        selected_tab.Get() == drag_new_tab_state.start_selected_tab.Get()) {
-      NodePtr hit_tab =
-          GetTabAtPoint(top_container_view, drag_new_tab_state.drop_point);
-      if (hit_tab) {
-        SelectTab(hit_tab);
-      }
-    }
-  }
+  drag_new_tab_state.pending = false;
+  drag_new_tab_state.check_attempts = 0;
+  drag_new_tab_state.start_tabs.clear();
+  drag_new_tab_state.armed = false;
 }
 
-void PrepareDragNewTabState() {
-  if (drag_new_tab_timer != 0) {
-    KillTimer(nullptr, drag_new_tab_timer);
-    drag_new_tab_timer = 0;
-  }
-  if (drag_new_tab_restore_timer != 0) {
-    KillTimer(nullptr, drag_new_tab_restore_timer);
-    drag_new_tab_restore_timer = 0;
-  }
-  drag_new_tab_restore_tab = nullptr;
-  drag_new_tab_state.pending = false;
-
+void QueueDragNewTabCheck(HWND hwnd, const NodePtr& top_container_view,
+                          POINT pt) {
   int mode = config.GetDragNewTabMode();
   if (mode != 1 && mode != 2) {
     ResetDragNewTabState();
     return;
   }
-
-  HWND hwnd = GetTopWnd(GetFocus());
-  NodePtr top_container_view = GetTopContainerView(hwnd);
-  if (!top_container_view) {
-    ResetDragNewTabState();
-    return;
-  }
-
   drag_new_tab_state.mode = mode;
-  drag_new_tab_state.hwnd = hwnd;
-  drag_new_tab_state.start_tab_count = GetTabCount(top_container_view);
-  drag_new_tab_state.start_selected_tab = GetSelectedTab(top_container_view);   
-  drag_new_tab_state.start_tabs = GetTabs(top_container_view);
-  drag_new_tab_state.start_selected_index =
-      GetTabIndex(drag_new_tab_state.start_tabs,
-                  drag_new_tab_state.start_selected_tab);
-}
-
-void QueueDragNewTabCheck(POINT pt) {
-  if (drag_new_tab_state.mode != 1 && drag_new_tab_state.mode != 2) {
-    return;
-  }
-  if (!drag_new_tab_state.hwnd) {
-    return;
+  if (drag_new_tab_state.start_tabs.empty() ||
+      drag_new_tab_state.hwnd != hwnd) {
+    if (!InitDragNewTabState(hwnd, top_container_view)) {
+      return;
+    }
   }
 
   if (drag_new_tab_restore_timer != 0) {
@@ -436,15 +490,18 @@ void QueueDragNewTabCheck(POINT pt) {
     drag_new_tab_restore_timer = 0;
   }
   drag_new_tab_restore_tab = nullptr;
+  drag_new_tab_restore_attempts = 0;
   drag_new_tab_state.drop_point = pt;
   drag_new_tab_state.pending = true;
+  drag_new_tab_state.check_attempts = kDragNewTabMaxAttempts;
 
   if (drag_new_tab_timer != 0) {
     KillTimer(nullptr, drag_new_tab_timer);
     drag_new_tab_timer = 0;
   }
-  // Delay the check to allow Chrome to finish the drag-drop tab creation.
-  drag_new_tab_timer = SetTimer(nullptr, 0, 120, DragNewTabTimerProc);
+  // Delay the check to allow Chrome to finish the drag-drop tab creation.      
+  drag_new_tab_timer =
+      SetTimer(nullptr, 0, kDragNewTabCheckIntervalMs, DragNewTabTimerProc);
 }
 
 // Open bookmarks in a new tab.
@@ -492,14 +549,28 @@ LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(mouse_hook, nCode, wParam, lParam);
   }
 
-  if (wParam == WM_MOUSEMOVE || wParam == WM_NCMOUSEMOVE) {
-    return CallNextHookEx(mouse_hook, nCode, wParam, lParam);
-  }
   PMOUSEHOOKSTRUCT pmouse = reinterpret_cast<PMOUSEHOOKSTRUCT>(lParam);
 
   // Defining a `dwExtraInfo` value to prevent hook the message sent by
   // Chrome++ itself.
   if (pmouse->dwExtraInfo == GetMagicCode()) {
+    return CallNextHookEx(mouse_hook, nCode, wParam, lParam);
+  }
+
+  if (wParam == WM_MOUSEMOVE || wParam == WM_NCMOUSEMOVE) {
+    if (IsDragNewTabEnabled() && IsPressed(VK_LBUTTON)) {
+      POINT pt = pmouse->pt;
+      HWND hwnd = WindowFromPoint(pt);
+      hwnd = GetTopWnd(hwnd);
+      NodePtr top_container_view = GetTopContainerView(hwnd);
+      if (top_container_view && IsOnTheTabBar(top_container_view, pt)) {
+        drag_new_tab_state.armed = true;
+        if (drag_new_tab_state.start_tabs.empty() ||
+            drag_new_tab_state.hwnd != hwnd) {
+          InitDragNewTabState(hwnd, top_container_view);
+        }
+      }
+    }
     return CallNextHookEx(mouse_hook, nCode, wParam, lParam);
   }
 
@@ -509,13 +580,33 @@ LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDOWN:
       // Simply record the position of `LBUTTONDOWN` for drag detection
       lbutton_down_point = pmouse->pt;
-      PrepareDragNewTabState();
+      drag_new_tab_state.armed = false;
+      if (drag_new_tab_timer != 0) {
+        KillTimer(nullptr, drag_new_tab_timer);
+        drag_new_tab_timer = 0;
+      }
+      drag_new_tab_state.pending = false;
+      drag_new_tab_state.check_attempts = 0;
+      drag_new_tab_state.start_tabs.clear();
       break;
     case WM_LBUTTONUP:
-      if (HandleDrag(pmouse)) {
-        QueueDragNewTabCheck(pmouse->pt);
-        break;
-      } else if (HandleBookmark(pmouse)) {
+      if (IsDragNewTabEnabled()) {
+        POINT pt = pmouse->pt;
+        HWND hwnd = WindowFromPoint(pt);
+        hwnd = GetTopWnd(hwnd);
+        NodePtr top_container_view = GetTopContainerView(hwnd);
+        if (top_container_view && IsOnTheTabBar(top_container_view, pt) &&
+            !IsOnNewTabButton(top_container_view, pt) &&
+            (drag_new_tab_state.armed || HandleDrag(pmouse))) {
+          QueueDragNewTabCheck(hwnd, top_container_view, pt);
+          drag_new_tab_state.armed = false;
+          lbutton_down_point = {-1, -1};
+          break;
+        }
+      }
+      drag_new_tab_state.armed = false;
+      lbutton_down_point = {-1, -1};
+      if (HandleBookmark(pmouse)) {
         handled = true;
       }
       break;

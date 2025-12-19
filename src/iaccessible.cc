@@ -546,7 +546,7 @@ bool IsOnlyOneTab(const NodePtr& top) {
 // Whether the mouse is on the tab bar
 bool IsOnTheTabBar(const NodePtr& top, POINT pt) {
   bool flag = false;
-  NodePtr page_tab_list = FindElementWithRole(top, ROLE_SYSTEM_PAGETABLIST);
+  NodePtr page_tab_list = FindElementWithRole(top, ROLE_SYSTEM_PAGETABLIST);    
   if (!page_tab_list) {
     return false;
   }
@@ -556,6 +556,26 @@ bool IsOnTheTabBar(const NodePtr& top, POINT pt) {
     }
   });
   return flag;
+}
+
+bool IsOnNewTabButton(const NodePtr& top, POINT pt) {
+  NodePtr page_tab_list = FindElementWithRole(top, ROLE_SYSTEM_PAGETABLIST);
+  if (!page_tab_list) {
+    return false;
+  }
+  bool hit = false;
+  TraversalAccessible(page_tab_list, [&hit, &pt](const NodePtr& child) {
+    if (GetAccessibleRole(child) != ROLE_SYSTEM_PUSHBUTTON) {
+      return false;
+    }
+    GetAccessibleSize(child, [&hit, &pt](RECT rect) {
+      if (PtInRect(&rect, pt)) {
+        hit = true;
+      }
+    });
+    return hit;
+  });
+  return hit;
 }
 
 bool IsOnNewTab(const NodePtr& top) {

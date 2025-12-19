@@ -17,6 +17,7 @@ bool SelectTab(const NodePtr& tab);
 bool IsOnOneTab(const NodePtr& top, POINT pt);
 bool IsOnlyOneTab(const NodePtr& top);
 bool IsOnTheTabBar(const NodePtr& top, POINT pt);
+bool IsOnNewTabButton(const NodePtr& top, POINT pt);
 bool IsOnNewTab(const NodePtr& top);
 bool IsOnBookmark(HWND hwnd, POINT pt);
 bool IsOnExpandedList(HWND hwnd, POINT pt);
