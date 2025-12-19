@@ -210,8 +210,7 @@ void ResetDragNewTabState() {
   drag_new_tab_state.pending = false;
 }
 
-NodePtr FindNewTabAfterDrag(const NodePtr& top) {
-  auto tabs = GetTabs(top);
+NodePtr FindNewTabAfterDrag(const std::vector<NodePtr>& tabs) {
   if (drag_new_tab_state.start_tabs.empty()) {
     return nullptr;
   }
@@ -228,6 +227,37 @@ NodePtr FindNewTabAfterDrag(const NodePtr& top) {
     }
   }
   return nullptr;
+}
+
+int GetTabIndex(const std::vector<NodePtr>& tabs, const NodePtr& target_tab) {
+  if (!target_tab) {
+    return -1;
+  }
+  for (size_t i = 0; i < tabs.size(); ++i) {
+    if (tabs[i].Get() == target_tab.Get()) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+int GetMoveStepsToEnd(const std::vector<NodePtr>& tabs,
+                      const NodePtr& target_tab) {
+  int index = GetTabIndex(tabs, target_tab);
+  if (index < 0) {
+    return 0;
+  }
+  int last_index = static_cast<int>(tabs.size()) - 1;
+  return last_index > index ? last_index - index : 0;
+}
+
+void MoveSelectedTabToEnd(HWND hwnd, int steps) {
+  if (!hwnd || steps <= 0) {
+    return;
+  }
+  for (int i = 0; i < steps; ++i) {
+    ExecuteCommand(IDC_MOVE_TAB_NEXT, hwnd);
+  }
 }
 
 void CALLBACK DragNewTabTimerProc(HWND, UINT, UINT_PTR timer_id, DWORD) {
@@ -254,22 +284,39 @@ void CALLBACK DragNewTabTimerProc(HWND, UINT, UINT_PTR timer_id, DWORD) {
   }
 
   NodePtr selected_tab = GetSelectedTab(top_container_view);
+  auto tabs = GetTabs(top_container_view);
+  NodePtr new_tab = FindNewTabAfterDrag(tabs);
+  int move_steps = GetMoveStepsToEnd(tabs, new_tab);
+
   if (drag_new_tab_state.mode == 2) {
-    if (selected_tab && drag_new_tab_state.start_selected_tab &&
-        selected_tab.Get() != drag_new_tab_state.start_selected_tab.Get()) {
+    bool need_restore = selected_tab && drag_new_tab_state.start_selected_tab &&
+                        selected_tab.Get() !=
+                            drag_new_tab_state.start_selected_tab.Get();
+    if (new_tab && move_steps > 0) {
+      if (!selected_tab || selected_tab.Get() != new_tab.Get()) {
+        SelectTab(new_tab);
+        need_restore = true;
+      }
+      MoveSelectedTabToEnd(drag_new_tab_state.hwnd, move_steps);
+    }
+    if (need_restore) {
       SelectTab(drag_new_tab_state.start_selected_tab);
     }
     return;
   }
 
   if (drag_new_tab_state.mode == 1) {
+    if (new_tab) {
+      if (!selected_tab || selected_tab.Get() != new_tab.Get()) {
+        SelectTab(new_tab);
+      }
+      if (move_steps > 0) {
+        MoveSelectedTabToEnd(drag_new_tab_state.hwnd, move_steps);
+      }
+      return;
+    }
     if (selected_tab && drag_new_tab_state.start_selected_tab &&
         selected_tab.Get() == drag_new_tab_state.start_selected_tab.Get()) {
-      NodePtr new_tab = FindNewTabAfterDrag(top_container_view);
-      if (new_tab) {
-        SelectTab(new_tab);
-        return;
-      }
       NodePtr hit_tab =
           GetTabAtPoint(top_container_view, drag_new_tab_state.drop_point);
       if (hit_tab) {

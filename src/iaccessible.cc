@@ -497,11 +497,10 @@ bool SelectTab(const NodePtr& tab) {
   VARIANT self;
   self.vt = VT_I4;
   self.lVal = CHILDID_SELF;
-  if (S_OK == tab->accDoDefaultAction(self)) {
+  if (S_OK == tab->accSelect(SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION, self)) {
     return true;
   }
-  return S_OK == tab->accSelect(SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION,      
-                                self);
+  return S_OK == tab->accDoDefaultAction(self);
 }
 
 // Whether the mouse is on a tab
