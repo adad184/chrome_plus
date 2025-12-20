@@ -569,11 +569,12 @@ LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
       NodePtr top_container_view = GetTopContainerView(hwnd);
       bool is_on_tab_bar =
           top_container_view && IsOnTheTabBar(top_container_view, pt);
-      if (is_on_tab_bar && IsPressed(VK_LBUTTON) && !lbutton_down_on_tab_bar) {
+      bool has_down_point = HasValidLButtonDownPoint();
+      bool drag_started_on_tab_bar = has_down_point && lbutton_down_on_tab_bar;
+      if (is_on_tab_bar && IsPressed(VK_LBUTTON) && !drag_started_on_tab_bar) {
         bool from_outside = !last_on_tab_bar;
-        bool dragged_from_down =
-            HasValidLButtonDownPoint() && HandleDrag(pmouse);
-        if (from_outside || dragged_from_down) {
+        bool dragged_from_down = has_down_point && HandleDrag(pmouse);
+        if (from_outside || dragged_from_down || !has_down_point) {
           if (!drag_new_tab_state.armed || drag_new_tab_state.hwnd != hwnd) {
             InitDragNewTabState(hwnd, top_container_view);
           }
