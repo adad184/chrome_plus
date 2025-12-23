@@ -32,6 +32,8 @@ void OnHotkey(HotkeyAction action) {
   }
 }
 
+void HandleUnmuteRetryTimer();
+
 // Static variables for internal use
 bool is_hide = false;
 std::vector<HWND> hwnd_list;
@@ -39,7 +41,8 @@ std::unordered_map<std::wstring, bool> original_mute_states;
 bool saved_any_session = false;
 bool had_unmuted_session = false;
 std::atomic_bool pending_unmute(false);
-// Retry unmute with a fast/slow cadence to catch late audio session creation.
+HWND unmute_timer_hwnd = nullptr;
+// Retry unmute with a fast/slow cadence to catch late audio session creation.  
 constexpr UINT_PTR kUnmuteRetryTimerId = 1;
 constexpr UINT kUnmuteRetryFastDelayMs = 200;
 constexpr int kUnmuteRetryFastMax = 20;
@@ -83,6 +86,10 @@ bool EnsureBossKeyWindow() {
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wParam,
                         LPARAM lParam) -> LRESULT {
+      if (msg == WM_TIMER && wParam == kUnmuteRetryTimerId) {
+        HandleUnmuteRetryTimer();
+        return 0;
+      }
       if (msg == WM_HOTKEY && wParam == kBossKeyHotkeyId) {
         if (bosskey_action) {
           bosskey_action();
@@ -495,7 +502,8 @@ Cleanup:
 }
 
 void StopUnmuteRetries(bool clear_state) {
-  KillTimer(nullptr, kUnmuteRetryTimerId);
+  KillTimer(unmute_timer_hwnd, kUnmuteRetryTimerId);
+  unmute_timer_hwnd = nullptr;
   unmute_retry_left = 0;
   unmute_retry_slow_left = 0;
   if (clear_state) {
@@ -512,7 +520,12 @@ void StartUnmuteRetries() {
   }
   UINT delay =
       (unmute_retry_left > 0) ? kUnmuteRetryFastDelayMs : kUnmuteRetrySlowDelayMs;
-  if (SetTimer(nullptr, kUnmuteRetryTimerId, delay, nullptr) == 0) {
+  if (bosskey_hwnd && IsWindow(bosskey_hwnd)) {
+    unmute_timer_hwnd = bosskey_hwnd;
+  } else {
+    unmute_timer_hwnd = nullptr;
+  }
+  if (SetTimer(unmute_timer_hwnd, kUnmuteRetryTimerId, delay, nullptr) == 0) {
     StopUnmuteRetries(true);
   }
 }
@@ -701,7 +714,8 @@ void HandleUnmuteRetryTimer() {
   if (unmute_retry_left > 0) {
     --unmute_retry_left;
     if (unmute_retry_left <= 0 && unmute_retry_slow_left > 0) {
-      if (SetTimer(nullptr, kUnmuteRetryTimerId, kUnmuteRetrySlowDelayMs,
+      if (SetTimer(unmute_timer_hwnd, kUnmuteRetryTimerId,
+                   kUnmuteRetrySlowDelayMs,
                    nullptr) == 0) {
         StopUnmuteRetries(true);
         return;
@@ -713,7 +727,8 @@ void HandleUnmuteRetryTimer() {
   if (unmute_retry_left <= 0 && unmute_retry_slow_left <= 0) {
     if (pending_unmute.load()) {
       unmute_retry_slow_left = kUnmuteRetrySlowMax;
-      if (SetTimer(nullptr, kUnmuteRetryTimerId, kUnmuteRetrySlowDelayMs,       
+      if (SetTimer(unmute_timer_hwnd, kUnmuteRetryTimerId,
+                   kUnmuteRetrySlowDelayMs,
                    nullptr) == 0) {
         StopUnmuteRetries(true);
       }
@@ -771,36 +786,37 @@ void HideAndShow() {
 void Hotkey(std::wstring_view keys, HotkeyAction action) {
   if (keys.empty()) {
     return;
-  } else {
-    UINT flag = ParseHotkeys(keys.data());
-
-    std::thread th([flag, action]() {
-      RegisterHotKey(nullptr, 0, LOWORD(flag), HIWORD(flag));
-
-      MSG msg;
-      while (GetMessage(&msg, nullptr, 0, 0)) {
-        if (msg.message == WM_TIMER) {
-          if (msg.wParam == kUnmuteRetryTimerId) {
-            HandleUnmuteRetryTimer();
-            continue;
-          }
-        }
-        if (msg.message == WM_HOTKEY) {
-          OnHotkey(action);
-        }
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-      }
-    });
-    th.detach();
-  }
-  if (!EnsureBossKeyWindow()) {
-    return;
   }
   UINT flag = ParseHotkeys(keys.data());
-  bosskey_action = action;
-  UnregisterHotKey(bosskey_hwnd, kBossKeyHotkeyId);
-  RegisterHotKey(bosskey_hwnd, kBossKeyHotkeyId, LOWORD(flag), HIWORD(flag));
+  if (EnsureBossKeyWindow()) {
+    bosskey_action = action;
+    UnregisterHotKey(bosskey_hwnd, kBossKeyHotkeyId);
+    RegisterHotKey(bosskey_hwnd, kBossKeyHotkeyId, LOWORD(flag), HIWORD(flag));
+  }
+
+  std::thread th([flag, action]() {
+    RegisterHotKey(nullptr, 0, LOWORD(flag), HIWORD(flag));
+
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+      if (msg.message == WM_TIMER) {
+        if (msg.wParam == kUnmuteRetryTimerId) {
+          HandleUnmuteRetryTimer();
+          continue;
+        }
+      }
+      if (msg.message == WM_HOTKEY) {
+        if (bosskey_hwnd && IsWindow(bosskey_hwnd)) {
+          PostMessageW(bosskey_hwnd, WM_HOTKEY, kBossKeyHotkeyId, 0);
+        } else {
+          OnHotkey(action);
+        }
+      }
+      TranslateMessage(&msg);
+      DispatchMessage(&msg);
+    }
+  });
+  th.detach();
 }
 
 }  // anonymous namespace
