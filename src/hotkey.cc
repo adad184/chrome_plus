@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -24,6 +25,12 @@
 namespace {
 
 using HotkeyAction = void (*)();
+
+void OnHotkey(HotkeyAction action) {
+  if (action) {
+    action();
+  }
+}
 
 // Static variables for internal use
 bool is_hide = false;
